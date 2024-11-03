@@ -38,10 +38,76 @@ function appendChat(path, message) {
   writeFile(path, chatString)
 }
 
+function findMarkdownCodeBlocks(markdownText) {
+  const codeBlockMarkerRegex = /^( {0,3})(`{3,})(\w*)/gm
+  const matches = Array.from(markdownText.matchAll(codeBlockMarkerRegex))
+    .map(match => ({
+      type: match[3] || "",
+      index: match.index,
+      backticks: match[2],
+      fullMatch: match[0],
+      nextLine: markdownText.slice(match.index + match[0].length + 1).match(/^.*$/m)?.[0] || ""
+    }))
+
+  return matches.reduce((acc, match) => {
+    const nextLineEmpty = match.nextLine.trim() === "" || match.nextLine.trim() === match.backticks
+    const lastOpen = acc.openBlocks[acc.openBlocks.length - 1]
+    const backtickMatch = lastOpen && lastOpen.backticks === match.backticks
+    const markerIsAnnotated = match.type !== "";
+    const isOpening = markerIsAnnotated || !nextLineEmpty || !backtickMatch
+
+    if (isOpening) {
+      return {
+        openBlocks: [...acc.openBlocks, match],
+        markdownBlocks: acc.markdownBlocks
+      }
+    } else {
+      return lastOpen.type === "markdown"
+        ? {
+            openBlocks: acc.openBlocks.slice(0, -1),
+            markdownBlocks: [...acc.markdownBlocks, {
+              start: lastOpen.index,
+              startLength: lastOpen.fullMatch.length,
+              end: match.index + match.fullMatch.length + 1,
+              endLength: match.fullMatch.length,
+              backticks: lastOpen.backticks
+            }]
+          }
+        : {
+            openBlocks: acc.openBlocks.slice(0, -1),
+            markdownBlocks: acc.markdownBlocks
+          }
+    }
+  }, { openBlocks: [], markdownBlocks: [] })
+}
+
+function indentText(text) {
+  const lines = text.split("\n")
+  return lines.length === 1
+    ? lines[0]
+    : lines.slice(0, -1).map(line => ` ${line}`).join("\n") + "\n" + lines[lines.length - 1]
+}
+
+function escapeMarkdownCodeBlocks(markdownText) {
+  if (!markdownText.includes("```markdown")) return markdownText
+  const codeBlocks = findMarkdownCodeBlocks(markdownText)
+  // console.log("open", JSON.stringify(codeBlocks.openBlocks.map(block => `${block.fullMatch} next: ${block.nextLine}`), null, 2))
+  // console.log("markdown", JSON.stringify(codeBlocks.markdownBlocks.map(block => `${markdownText.slice(block.start, block.start+30)} ... ${markdownText.slice(block.end-30, block.end)}`), null, 2))
+  return codeBlocks.markdownBlocks
+    .reverse()
+    .reduce((text, block) => (
+      text.slice(0, block.start) +
+      block.backticks + "markdown" +
+      indentText(text.slice(block.start + block.startLength, block.end - block.endLength - 1)) +
+      block.backticks + "\n" +
+      text.slice(block.end)
+    ), markdownText)
+}
+
 function markdownChat(messages, ignoreLastInterrupted = true) {
   return messages.reduce((accumulator, current, index, allMessages) => {
     if (current["role"] === "assistant")
-      return `${accumulator}${current["content"]}\n\n`
+      return `${accumulator}${escapeMarkdownCodeBlocks(current["content"])}\n\n`
 
     if (current["role"] === "user") {
       const userMessage = current["content"].split("\n").map(line => `### ${line}`).join("\n") // support multi-line questions (e.g. via External Trigger)
@@ -146,7 +212,7 @@ function readStream(streamFile, chatFile, pidStreamFile) {
 
     // Stop
     return JSON.stringify({
-      response: `${responseText} [Connection Stalled]`,
+      response: `${escapeMarkdownCodeBlocks(responseText)} [Connection Stalled]`,
       footer: "You can ask ChatGPT to continue the answer",
       behaviour: { response: "replacelast", scroll: "end" }
     })
@@ -165,7 +231,7 @@ function readStream(streamFile, chatFile, pidStreamFile) {
   if (finishReason === null) return JSON.stringify({
     rerun: 0.1,
     variables: { streaming_now: true },
-    response: responseText,
+    response: escapeMarkdownCodeBlocks(responseText),
     behaviour: { response: "replacelast", scroll: "end" }
   })
 
@@ -184,7 +250,7 @@ function readStream(streamFile, chatFile, pidStreamFile) {
 
   // Stop
   return JSON.stringify({
-    response: responseText,
+    response: escapeMarkdownCodeBlocks(responseText),
     footer: footerText,
     behaviour: { response: "replacelast", scroll: "end" }
   })
